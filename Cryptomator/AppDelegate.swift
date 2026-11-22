@@ -72,12 +72,8 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
 	}
 
 	private func setupIAP() {
-		#if ALWAYS_PREMIUM
 		DDLogDebug("Always activated premium")
 		CryptomatorUserDefaults.shared.fullVersionUnlocked = true
-		#else
-		DDLogDebug("Freemium version")
-		#endif
 	}
 }
 
@@ -87,10 +83,6 @@ class AppDelegate: UIResponder, UIApplicationDelegate {
  */
 nonisolated extension FullVersionCheckerKey: DependencyKey {
 	public static var liveValue: FullVersionChecker {
-		#if ALWAYS_PREMIUM
 		return AlwaysActivatedPremium.default
-		#else
-		return UserDefaultsFullVersionChecker.default
-		#endif
 	}
 }

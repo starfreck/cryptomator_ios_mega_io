@@ -106,20 +106,20 @@ public final class MegaClient: Sendable {
 		}
 
 		var derivedAesKey: [UInt8]
-		var derivedAuthKey: [UInt8]
 		var userHash: String
+		var sekString: String?
 
 		if version == 2, let saltBytes = salt {
 			guard let (aesKey, authKey) = MegaCrypto.deriveKeyV2(password: cleanPassword, salt: saltBytes) else {
 				throw MegaClientError.cryptoError
 			}
 			derivedAesKey = aesKey
-			derivedAuthKey = authKey
-			userHash = MegaCrypto.stringHash(string: cleanEmail, aesKey: derivedAesKey)
+			userHash = MegaCrypto.base64urlEncode(authKey)
+			let randomBytes = (0..<16).map { _ in UInt8.random(in: 0...255) }
+			sekString = MegaCrypto.base64urlEncode(randomBytes)
 		} else {
 			let pwKey = MegaCrypto.passwordKey(password: cleanPassword)
 			derivedAesKey = pwKey
-			derivedAuthKey = pwKey
 			userHash = MegaCrypto.stringHash(string: cleanEmail, aesKey: pwKey)
 		}
 
@@ -129,6 +129,9 @@ public final class MegaClient: Sendable {
 			"user": cleanEmail,
 			"uh": userHash
 		]
+		if let sek = sekString {
+			loginPayload["sek"] = sek
+		}
 		if let mfa = twoFactorCode, !mfa.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty {
 			loginPayload["mfa"] = mfa.trimmingCharacters(in: .whitespacesAndNewlines)
 		}
@@ -155,7 +158,7 @@ public final class MegaClient: Sendable {
 			throw MegaClientError.invalidResponse
 		}
 
-		guard let decMasterKey = MegaCrypto.aesEcbDecrypt(data: encMasterKey, key: derivedAuthKey) else {
+		guard let decMasterKey = MegaCrypto.aesEcbDecrypt(data: encMasterKey, key: derivedAesKey) else {
 			throw MegaClientError.cryptoError
 		}
 

@@ -28,22 +28,10 @@ public struct SalePromo: Sendable {
 	}
 
 	public func shouldShowHalloween2026Banner() -> Bool {
-		#if !ALWAYS_PREMIUM
-		return SalePromo.isHalloween2026Active()
-			&& !(cryptomatorSettings.fullVersionUnlocked || cryptomatorSettings.hasRunningSubscription)
-			&& !cryptomatorSettings.halloween2026BannerDismissed
-		#else
 		return false
-		#endif
 	}
 
 	public func shouldShowHalloween2026UnlockPromo() -> Bool {
-		#if !ALWAYS_PREMIUM
-		return SalePromo.isHalloween2026Active()
-			&& !(cryptomatorSettings.fullVersionUnlocked || cryptomatorSettings.hasRunningSubscription)
-			&& !cryptomatorSettings.halloween2026UnlockPromoShown
-		#else
 		return false
-		#endif
 	}
 }

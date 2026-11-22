@@ -324,11 +324,7 @@ class FileProviderExtension: NSFileProviderExtension {
  */
 extension FullVersionCheckerKey: DependencyKey {
 	public static var liveValue: FullVersionChecker {
-		#if ALWAYS_PREMIUM
 		return AlwaysActivatedPremium.default
-		#else
-		return UserDefaultsFullVersionChecker.default
-		#endif
 	}
 }
 

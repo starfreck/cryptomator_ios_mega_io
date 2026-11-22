@@ -101,7 +101,7 @@ extension CryptomatorUserDefaults: CryptomatorSettings {
 	}
 
 	public var fullVersionUnlocked: Bool {
-		get { read() ?? false }
+		get { true }
 		set { write(value: newValue) }
 	}
 

@@ -36,25 +36,11 @@ public final class UserDefaultsFullVersionChecker: FullVersionChecker {
 	public static let `default` = UserDefaultsFullVersionChecker()
 
 	public var isFullVersion: Bool {
-		if cryptomatorSettings.fullVersionUnlocked {
-			return true
-		}
-		if cryptomatorSettings.hasRunningSubscription {
-			return true
-		}
-		if let trialExpirationDate = cryptomatorSettings.trialExpirationDate, trialExpirationDate > Date() {
-			return true
-		} else {
-			return false
-		}
+		return true
 	}
 
 	public var hasExpiredTrial: Bool {
-		if let trialExpirationDate = cryptomatorSettings.trialExpirationDate, trialExpirationDate <= Date() {
-			return true
-		} else {
-			return false
-		}
+		return false
 	}
 }
 
