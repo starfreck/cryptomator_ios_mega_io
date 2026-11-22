@@ -424,33 +424,46 @@ public final class MegaClient: Sendable {
 
 		let (tempURL, response) = try await session.download(for: req)
 		guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+			try? FileManager.default.removeItem(at: tempURL)
 			throw MegaClientError.invalidResponse
 		}
 
-		let fileData = try Data(contentsOf: tempURL)
-		try? FileManager.default.removeItem(at: tempURL)
-
-		let baseIvBytes = [UInt8](iv)
-		let keyBytes = [UInt8](node.aesKey)
-
-		var decryptedData = Data()
-		decryptedData.reserveCapacity(fileData.count)
-
-		let chunkList = MegaCrypto.chunkSizes(fileSize: Int64(fileData.count))
-		for chunk in chunkList {
-			let start = Int(chunk.offset)
-			let end = start + chunk.length
-			let chunkCiphertext = [UInt8](fileData[start..<end])
-			let ctrIv = MegaCrypto.makeCtrIv(baseIv: baseIvBytes, offset: chunk.offset)
-			guard let chunkPlaintext = MegaCrypto.aesCtrCrypt(data: chunkCiphertext, key: keyBytes, iv: ctrIv) else {
-				throw MegaClientError.cryptoError
-			}
-			decryptedData.append(contentsOf: chunkPlaintext)
-			progress?.completedUnitCount += Int64(chunk.length)
+		defer {
+			try? FileManager.default.removeItem(at: tempURL)
 		}
 
 		try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
-		try decryptedData.write(to: localURL)
+		if FileManager.default.fileExists(atPath: localURL.path) {
+			try? FileManager.default.removeItem(at: localURL)
+		}
+		FileManager.default.createFile(atPath: localURL.path, contents: nil, attributes: nil)
+
+		let readHandle = try FileHandle(forReadingFrom: tempURL)
+		defer { try? readHandle.close() }
+
+		let writeHandle = try FileHandle(forWritingTo: localURL)
+		defer { try? writeHandle.close() }
+
+		let fileSize = (try? FileManager.default.attributesOfItem(atPath: tempURL.path)[.size] as? Int64) ?? 0
+		let chunkList = MegaCrypto.chunkSizes(fileSize: fileSize)
+		let baseIvBytes = [UInt8](iv)
+		let keyBytes = [UInt8](node.aesKey)
+
+		for chunk in chunkList {
+			try autoreleasepool {
+				try readHandle.seek(toOffset: UInt64(chunk.offset))
+				guard let chunkData = try readHandle.read(upToCount: chunk.length), !chunkData.isEmpty else {
+					throw MegaClientError.invalidResponse
+				}
+				let chunkCiphertext = [UInt8](chunkData)
+				let ctrIv = MegaCrypto.makeCtrIv(baseIv: baseIvBytes, offset: chunk.offset)
+				guard let chunkPlaintext = MegaCrypto.aesCtrCrypt(data: chunkCiphertext, key: keyBytes, iv: ctrIv) else {
+					throw MegaClientError.cryptoError
+				}
+				try writeHandle.write(contentsOf: Data(chunkPlaintext))
+				progress?.completedUnitCount += Int64(chunk.length)
+			}
+		}
 	}
 
 	// MARK: - File Upload
@@ -461,8 +474,7 @@ public final class MegaClient: Sendable {
 			return masterKey
 		}
 
-		let fileData = try Data(contentsOf: localURL)
-		let fileSize = Int64(fileData.count)
+		let fileSize = (try? FileManager.default.attributesOfItem(atPath: localURL.path)[.size] as? Int64) ?? 0
 
 		let res = try await apiRequest(payload: [["a": "u", "s": fileSize]])
 		guard let dict = res.first as? [String: Any],
@@ -481,27 +493,30 @@ public final class MegaClient: Sendable {
 		let ivA32: [UInt32] = [randA32[4], randA32[5]]
 		let baseIv = MegaCrypto.a32ToBytes(ivA32)
 
-		var encryptedData = Data()
-		encryptedData.reserveCapacity(fileData.count)
-
 		let chunkList = MegaCrypto.chunkSizes(fileSize: fileSize)
 		var chunkMacIv = baseIv
 
 		let rawKeyA32: [UInt32] = [randA32[0], randA32[1], randA32[2], randA32[3]]
 		let tempKeyBytes = MegaCrypto.a32ToBytes(rawKeyA32)
 
+		let readHandle = try FileHandle(forReadingFrom: localURL)
+		defer { try? readHandle.close() }
+
 		var macA32: [UInt32] = [0, 0]
 		for chunk in chunkList {
-			let start = Int(chunk.offset)
-			let end = start + chunk.length
-			let chunkPlaintext = [UInt8](fileData[start..<end])
-
-			let (chunkMac, nextIv) = MegaCrypto.computeChunkMac(chunkData: chunkPlaintext, key: tempKeyBytes, initialIv: chunkMacIv)
-			chunkMacIv = nextIv
-			let macBytesA32 = MegaCrypto.bytesToA32(chunkMac)
-			if macBytesA32.count >= 2 {
-				macA32[0] ^= macBytesA32[0]
-				macA32[1] ^= macBytesA32[1]
+			try autoreleasepool {
+				try readHandle.seek(toOffset: UInt64(chunk.offset))
+				guard let chunkData = try readHandle.read(upToCount: chunk.length) else {
+					throw MegaClientError.invalidResponse
+				}
+				let chunkPlaintext = [UInt8](chunkData)
+				let (chunkMac, nextIv) = MegaCrypto.computeChunkMac(chunkData: chunkPlaintext, key: tempKeyBytes, initialIv: chunkMacIv)
+				chunkMacIv = nextIv
+				let macBytesA32 = MegaCrypto.bytesToA32(chunkMac)
+				if macBytesA32.count >= 2 {
+					macA32[0] ^= macBytesA32[0]
+					macA32[1] ^= macBytesA32[1]
+				}
 			}
 		}
 
@@ -513,23 +528,35 @@ public final class MegaClient: Sendable {
 		]
 		let fileAesKey = MegaCrypto.a32ToBytes(fileAesKeyA32)
 
-		for chunk in chunkList {
-			let start = Int(chunk.offset)
-			let end = start + chunk.length
-			let chunkPlaintext = [UInt8](fileData[start..<end])
-			let ctrIv = MegaCrypto.makeCtrIv(baseIv: baseIv, offset: chunk.offset)
-			guard let chunkCiphertext = MegaCrypto.aesCtrCrypt(data: chunkPlaintext, key: fileAesKey, iv: ctrIv) else {
-				throw MegaClientError.cryptoError
-			}
-			encryptedData.append(contentsOf: chunkCiphertext)
-			progress?.completedUnitCount += Int64(chunk.length)
+		let tempEncryptedURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+		FileManager.default.createFile(atPath: tempEncryptedURL.path, contents: nil, attributes: nil)
+		let encWriteHandle = try FileHandle(forWritingTo: tempEncryptedURL)
+		defer {
+			try? encWriteHandle.close()
+			try? FileManager.default.removeItem(at: tempEncryptedURL)
 		}
+
+		for chunk in chunkList {
+			try autoreleasepool {
+				try readHandle.seek(toOffset: UInt64(chunk.offset))
+				guard let chunkData = try readHandle.read(upToCount: chunk.length) else {
+					throw MegaClientError.invalidResponse
+				}
+				let chunkPlaintext = [UInt8](chunkData)
+				let ctrIv = MegaCrypto.makeCtrIv(baseIv: baseIv, offset: chunk.offset)
+				guard let chunkCiphertext = MegaCrypto.aesCtrCrypt(data: chunkPlaintext, key: fileAesKey, iv: ctrIv) else {
+					throw MegaClientError.cryptoError
+				}
+				try encWriteHandle.write(contentsOf: Data(chunkCiphertext))
+				progress?.completedUnitCount += Int64(chunk.length)
+			}
+		}
+		try encWriteHandle.close()
 
 		var uploadReq = URLRequest(url: uploadURL)
 		uploadReq.httpMethod = "POST"
-		uploadReq.httpBody = encryptedData
 
-		let (uploadResData, uploadResponse) = try await session.data(for: uploadReq)
+		let (uploadResData, uploadResponse) = try await session.upload(for: uploadReq, fromFile: tempEncryptedURL)
 		guard let uploadHttp = uploadResponse as? HTTPURLResponse, (200...299).contains(uploadHttp.statusCode),
 		      let uploadHandle = String(data: uploadResData, encoding: .utf8)?.trimmingCharacters(in: .whitespacesAndNewlines) else {
 			throw MegaClientError.invalidResponse
