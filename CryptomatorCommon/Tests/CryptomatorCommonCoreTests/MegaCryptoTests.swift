@@ -66,11 +66,34 @@ class MegaCryptoTests: XCTestCase {
 		XCTAssertEqual(decName, name)
 	}
 
+	func testAttrEncryptionSpecialCharacters() {
+		let key = [UInt8](repeating: 0x88, count: 16)
+		let names = [
+			"File with \"quotes\" and 'single' quotes.pdf",
+			"Emoji file 📁 🚀 🔒.mp4",
+			"Special symbols !@#$%^&*()_+-=[]{}|;:,.<>?.txt",
+			"Non-ASCII name: 日本語_테스트_Привет.dat"
+		]
+		for name in names {
+			guard let encAttr = MegaCrypto.encryptAttr(key: key, name: name),
+			      let decName = MegaCrypto.decryptAttr(key: key, dataString: encAttr) else {
+				XCTFail("Attr encrypt/decrypt failed for: \(name)")
+				continue
+			}
+			XCTAssertEqual(decName, name)
+		}
+	}
+
 	func testChunkSizes() {
 		let fileSize: Int64 = 5 * 1024 * 1024 // 5 MB
 		let chunks = MegaCrypto.chunkSizes(fileSize: fileSize)
 		XCTAssertFalse(chunks.isEmpty)
 		let total = chunks.reduce(0) { $0 + Int64($1.length) }
 		XCTAssertEqual(total, fileSize)
+	}
+
+	func testChunkSizesZeroByte() {
+		let chunks = MegaCrypto.chunkSizes(fileSize: 0)
+		XCTAssertTrue(chunks.isEmpty)
 	}
 }

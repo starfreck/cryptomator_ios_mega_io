@@ -37,6 +37,21 @@ public final class MegaCloudProvider: CloudProvider, @unchecked Sendable {
 				return CloudProviderError.quotaInsufficient
 			case .networkError:
 				return CloudProviderError.noInternetConnection
+			case let .apiError(code):
+				switch code {
+				case -9:
+					return CloudProviderError.itemNotFound
+				case -11, -15, -16:
+					return CloudProviderError.unauthorized
+				case -12:
+					return CloudProviderError.itemAlreadyExists
+				case -17:
+					return CloudProviderError.quotaInsufficient
+				case -18:
+					return CloudProviderError.noInternetConnection
+				default:
+					return CloudProviderError.itemNotFound
+				}
 			default:
 				return CloudProviderError.itemNotFound
 			}
@@ -46,15 +61,18 @@ public final class MegaCloudProvider: CloudProvider, @unchecked Sendable {
 
 	// MARK: - CloudProvider Protocol Implementation
 
+	@concurrent
 	public func fetchItemMetadata(at cloudPath: CloudPath) async throws -> CloudItemMetadata {
+		try Task.checkCancellation()
 		try await ensureFileSystemFresh()
 		guard let node = client.resolvePath(cloudPath.path) else {
 			throw CloudProviderError.itemNotFound
 		}
 		let itemType: CloudItemType = node.isDirectory ? .folder : .file
 		let lastModified = node.timestamp > 0 ? Date(timeIntervalSince1970: TimeInterval(node.timestamp)) : nil
+		let name = (node.type == 2 || node.name.isEmpty) ? (cloudPath.lastPathComponent.isEmpty ? "/" : cloudPath.lastPathComponent) : node.name
 		return CloudItemMetadata(
-			name: node.name.isEmpty ? cloudPath.lastPathComponent : node.name,
+			name: name,
 			cloudPath: cloudPath,
 			itemType: itemType,
 			lastModifiedDate: lastModified,
@@ -62,10 +80,18 @@ public final class MegaCloudProvider: CloudProvider, @unchecked Sendable {
 		)
 	}
 
+	@concurrent
 	public func fetchItemList(forFolderAt cloudPath: CloudPath, withPageToken pageToken: String?) async throws -> CloudItemList {
+		try Task.checkCancellation()
+		guard pageToken == nil else {
+			throw CloudProviderError.pageTokenInvalid
+		}
 		try await ensureFileSystemFresh()
 		guard let parentNode = client.resolvePath(cloudPath.path) else {
 			throw CloudProviderError.itemNotFound
+		}
+		guard parentNode.isDirectory else {
+			throw CloudProviderError.itemTypeMismatch
 		}
 		let children = client.getChildren(of: parentNode.handle)
 		let items: [CloudItemMetadata] = children.map { child in
@@ -83,18 +109,44 @@ public final class MegaCloudProvider: CloudProvider, @unchecked Sendable {
 		return CloudItemList(items: items, nextPageToken: nil)
 	}
 
+	@concurrent
 	public func downloadFile(
 		from cloudPath: CloudPath,
 		to localURL: URL,
 		progress: Progress?,
 		onTaskCreation: (@concurrent @Sendable (URLSessionDownloadTask) async -> Void)?
 	) async throws -> CloudItemMetadata {
+		precondition(localURL.isFileURL)
+		try Task.checkCancellation()
+
+		if FileManager.default.fileExists(atPath: localURL.path) {
+			throw CloudProviderError.itemAlreadyExists
+		}
+
 		try await ensureFileSystemFresh()
 		guard let node = client.resolvePath(cloudPath.path) else {
 			throw CloudProviderError.itemNotFound
 		}
+		guard node.isFile else {
+			throw CloudProviderError.itemTypeMismatch
+		}
+
+		let stagingURL = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+		defer {
+			try? FileManager.default.removeItem(at: stagingURL)
+		}
+
 		do {
-			try await client.downloadFile(node: node, to: localURL, progress: progress)
+			try await client.downloadFile(node: node, to: stagingURL, progress: progress)
+			try Task.checkCancellation()
+
+			try FileManager.default.createDirectory(at: localURL.deletingLastPathComponent(), withIntermediateDirectories: true)
+			do {
+				try FileManager.default.moveItem(at: stagingURL, to: localURL)
+			} catch CocoaError.fileWriteFileExists {
+				throw CloudProviderError.itemAlreadyExists
+			}
+
 			let lastModified = node.timestamp > 0 ? Date(timeIntervalSince1970: TimeInterval(node.timestamp)) : nil
 			return CloudItemMetadata(
 				name: node.name,
@@ -108,6 +160,7 @@ public final class MegaCloudProvider: CloudProvider, @unchecked Sendable {
 		}
 	}
 
+	@concurrent
 	public func uploadFile(
 		from localURL: URL,
 		to cloudPath: CloudPath,
@@ -115,23 +168,43 @@ public final class MegaCloudProvider: CloudProvider, @unchecked Sendable {
 		progress: Progress?,
 		onTaskCreation: (@concurrent @Sendable (URLSessionUploadTask) async -> Void)?
 	) async throws -> CloudItemMetadata {
+		precondition(localURL.isFileURL)
+		try Task.checkCancellation()
+
+		var isDirectory: ObjCBool = false
+		let fileExists = FileManager.default.fileExists(atPath: localURL.path, isDirectory: &isDirectory)
+		if !fileExists {
+			throw CloudProviderError.itemNotFound
+		}
+		if isDirectory.boolValue {
+			throw CloudProviderError.itemTypeMismatch
+		}
+
 		try await ensureFileSystemFresh()
 		let parentPath = cloudPath.deletingLastPathComponent()
 		guard let parentNode = client.resolvePath(parentPath.path) else {
 			throw CloudProviderError.parentFolderDoesNotExist
 		}
+		guard parentNode.isDirectory else {
+			throw CloudProviderError.parentFolderDoesNotExist
+		}
 
 		let fileName = cloudPath.lastPathComponent
-		if let existing = client.getChildren(of: parentNode.handle).first(where: { $0.name == fileName }) {
-			if replaceExisting {
-				try await client.deleteNode(handle: existing.handle)
-			} else {
+		let existingNode = client.getChildren(of: parentNode.handle).first(where: { $0.name == fileName })
+		if let existing = existingNode {
+			if existing.isDirectory {
+				throw CloudProviderError.itemAlreadyExists
+			}
+			if !replaceExisting {
 				throw CloudProviderError.itemAlreadyExists
 			}
 		}
 
 		do {
 			let createdNode = try await client.uploadFile(from: localURL, name: fileName, parentHandle: parentNode.handle, progress: progress)
+			if replaceExisting, let old = existingNode {
+				try? await client.deleteNode(handle: old.handle)
+			}
 			let lastModified = createdNode.timestamp > 0 ? Date(timeIntervalSince1970: TimeInterval(createdNode.timestamp)) : nil
 			return CloudItemMetadata(
 				name: createdNode.name,
@@ -145,14 +218,22 @@ public final class MegaCloudProvider: CloudProvider, @unchecked Sendable {
 		}
 	}
 
+	@concurrent
 	public func createFolder(at cloudPath: CloudPath) async throws {
+		try Task.checkCancellation()
 		try await ensureFileSystemFresh()
+		let folderName = cloudPath.lastPathComponent
+		guard !folderName.isEmpty else {
+			throw CloudProviderError.itemAlreadyExists
+		}
 		let parentPath = cloudPath.deletingLastPathComponent()
 		guard let parentNode = client.resolvePath(parentPath.path) else {
 			throw CloudProviderError.parentFolderDoesNotExist
 		}
+		guard parentNode.isDirectory else {
+			throw CloudProviderError.parentFolderDoesNotExist
+		}
 
-		let folderName = cloudPath.lastPathComponent
 		if client.getChildren(of: parentNode.handle).contains(where: { $0.name == folderName }) {
 			throw CloudProviderError.itemAlreadyExists
 		}
@@ -164,18 +245,15 @@ public final class MegaCloudProvider: CloudProvider, @unchecked Sendable {
 		}
 	}
 
+	@concurrent
 	public func deleteFile(at cloudPath: CloudPath) async throws {
-		try await deleteItem(at: cloudPath)
-	}
-
-	public func deleteFolder(at cloudPath: CloudPath) async throws {
-		try await deleteItem(at: cloudPath)
-	}
-
-	private func deleteItem(at cloudPath: CloudPath) async throws {
+		try Task.checkCancellation()
 		try await ensureFileSystemFresh()
 		guard let node = client.resolvePath(cloudPath.path) else {
 			throw CloudProviderError.itemNotFound
+		}
+		guard node.isFile else {
+			throw CloudProviderError.itemTypeMismatch
 		}
 		do {
 			try await client.deleteNode(handle: node.handle)
@@ -184,25 +262,90 @@ public final class MegaCloudProvider: CloudProvider, @unchecked Sendable {
 		}
 	}
 
+	@concurrent
+	public func deleteFolder(at cloudPath: CloudPath) async throws {
+		try Task.checkCancellation()
+		try await ensureFileSystemFresh()
+		guard let node = client.resolvePath(cloudPath.path) else {
+			throw CloudProviderError.itemNotFound
+		}
+		guard node.isDirectory else {
+			throw CloudProviderError.itemTypeMismatch
+		}
+		do {
+			try await client.deleteNode(handle: node.handle)
+		} catch {
+			throw mapError(error, cloudPath: cloudPath)
+		}
+	}
+
+	@concurrent
 	public func moveFile(from sourceCloudPath: CloudPath, to targetCloudPath: CloudPath) async throws {
-		try await moveItem(from: sourceCloudPath, to: targetCloudPath)
-	}
-
-	public func moveFolder(from sourceCloudPath: CloudPath, to targetCloudPath: CloudPath) async throws {
-		try await moveItem(from: sourceCloudPath, to: targetCloudPath)
-	}
-
-	private func moveItem(from sourceCloudPath: CloudPath, to targetCloudPath: CloudPath) async throws {
+		try Task.checkCancellation()
 		try await ensureFileSystemFresh()
 		guard let sourceNode = client.resolvePath(sourceCloudPath.path) else {
 			throw CloudProviderError.itemNotFound
 		}
+		guard sourceNode.isFile else {
+			throw CloudProviderError.itemTypeMismatch
+		}
+
 		let targetParentPath = targetCloudPath.deletingLastPathComponent()
 		guard let targetParentNode = client.resolvePath(targetParentPath.path) else {
 			throw CloudProviderError.parentFolderDoesNotExist
 		}
+		guard targetParentNode.isDirectory else {
+			throw CloudProviderError.parentFolderDoesNotExist
+		}
+
+		let targetName = targetCloudPath.lastPathComponent
+		if client.getChildren(of: targetParentNode.handle).contains(where: { $0.name == targetName }) {
+			throw CloudProviderError.itemAlreadyExists
+		}
+
 		do {
-			try await client.moveNode(handle: sourceNode.handle, toParentHandle: targetParentNode.handle)
+			if sourceNode.parentHandle != targetParentNode.handle {
+				try await client.moveNode(handle: sourceNode.handle, toParentHandle: targetParentNode.handle)
+			}
+			if sourceNode.name != targetName {
+				try await client.renameNode(handle: sourceNode.handle, newName: targetName)
+			}
+		} catch {
+			throw mapError(error, cloudPath: sourceCloudPath)
+		}
+	}
+
+	@concurrent
+	public func moveFolder(from sourceCloudPath: CloudPath, to targetCloudPath: CloudPath) async throws {
+		try Task.checkCancellation()
+		try await ensureFileSystemFresh()
+		guard let sourceNode = client.resolvePath(sourceCloudPath.path) else {
+			throw CloudProviderError.itemNotFound
+		}
+		guard sourceNode.isDirectory else {
+			throw CloudProviderError.itemTypeMismatch
+		}
+
+		let targetParentPath = targetCloudPath.deletingLastPathComponent()
+		guard let targetParentNode = client.resolvePath(targetParentPath.path) else {
+			throw CloudProviderError.parentFolderDoesNotExist
+		}
+		guard targetParentNode.isDirectory else {
+			throw CloudProviderError.parentFolderDoesNotExist
+		}
+
+		let targetName = targetCloudPath.lastPathComponent
+		if client.getChildren(of: targetParentNode.handle).contains(where: { $0.name == targetName }) {
+			throw CloudProviderError.itemAlreadyExists
+		}
+
+		do {
+			if sourceNode.parentHandle != targetParentNode.handle {
+				try await client.moveNode(handle: sourceNode.handle, toParentHandle: targetParentNode.handle)
+			}
+			if sourceNode.name != targetName {
+				try await client.renameNode(handle: sourceNode.handle, newName: targetName)
+			}
 		} catch {
 			throw mapError(error, cloudPath: sourceCloudPath)
 		}

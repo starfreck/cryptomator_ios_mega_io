@@ -190,9 +190,16 @@ public enum MegaCrypto {
 		guard decrypted.count >= 4 else { return nil }
 		let prefix = String(decoding: decrypted[0..<4], as: UTF8.self)
 		guard prefix == "MEGA" else { return nil }
-		guard let fullStr = String(bytes: decrypted[4...], encoding: .utf8) else { return nil }
-		// Extract JSON substring {"n": "..."}
-		guard let start = fullStr.firstIndex(of: "{"),
+		let payload = decrypted[4...]
+		let jsonBytes: [UInt8]
+		if let nullIndex = payload.firstIndex(of: 0) {
+			jsonBytes = Array(payload[..<nullIndex])
+		} else {
+			jsonBytes = Array(payload)
+		}
+
+		guard let fullStr = String(bytes: jsonBytes, encoding: .utf8),
+		      let start = fullStr.firstIndex(of: "{"),
 		      let end = fullStr.lastIndex(of: "}") else { return nil }
 		let jsonStr = String(fullStr[start...end])
 		guard let jsonData = jsonStr.data(using: .utf8),
@@ -202,7 +209,10 @@ public enum MegaCrypto {
 	}
 
 	public static func encryptAttr(key: [UInt8], name: String) -> String? {
-		let jsonStr = "{\"n\":\"\(name)\"}"
+		guard let jsonData = try? JSONSerialization.data(withJSONObject: ["n": name]),
+		      let jsonStr = String(data: jsonData, encoding: .utf8) else {
+			return nil
+		}
 		let fullStr = "MEGA" + jsonStr
 		var bytes = [UInt8](fullStr.utf8)
 		let remainder = bytes.count % 16

@@ -60,8 +60,16 @@ public final class MegaClient: Sendable {
 	private let session: URLSession
 	private let state = OSAllocatedUnfairLock(initialState: State())
 
-	public init(session: URLSession = .shared) {
-		self.session = session
+	public init(session: URLSession? = nil) {
+		if let s = session {
+			self.session = s
+		} else {
+			let config = URLSessionConfiguration.default
+			config.timeoutIntervalForRequest = 45
+			config.timeoutIntervalForResource = 3600
+			config.waitsForConnectivity = true
+			self.session = URLSession(configuration: config)
+		}
 	}
 
 	public var isAuthenticated: Bool {
@@ -193,7 +201,10 @@ public final class MegaClient: Sendable {
 			$0.sessionId = nil
 			$0.masterKey = nil
 			$0.nodesByHandle.removeAll()
+			$0.childrenByParent.removeAll()
+			$0.pathToHandleCache.removeAll()
 			$0.rootHandle = nil
+			$0.lastFetchTime = nil
 		}
 	}
 
@@ -475,6 +486,36 @@ public final class MegaClient: Sendable {
 		}
 	}
 
+	public func renameNode(handle: String, newName: String) async throws {
+		let node = try state.withLock { state -> MegaNode in
+			guard let n = state.nodesByHandle[handle] else { throw MegaClientError.itemNotFound }
+			return n
+		}
+
+		guard let encAttr = MegaCrypto.encryptAttr(key: [UInt8](node.aesKey), name: newName) else {
+			throw MegaClientError.cryptoError
+		}
+
+		_ = try await apiRequest(payload: [["a": "a", "n": handle, "at": encAttr]])
+		state.withLock { state in
+			if let existing = state.nodesByHandle[handle] {
+				let updated = MegaNode(
+					handle: existing.handle,
+					parentHandle: existing.parentHandle,
+					name: newName,
+					type: existing.type,
+					size: existing.size,
+					timestamp: existing.timestamp,
+					nodeKey: existing.nodeKey,
+					aesKey: existing.aesKey,
+					iv: existing.iv
+				)
+				state.nodesByHandle[handle] = updated
+				state.pathToHandleCache.removeAll()
+			}
+		}
+	}
+
 	// MARK: - File Download
 
 	public func downloadFile(node: MegaNode, to localURL: URL, progress: Progress? = nil) async throws {
@@ -484,8 +525,15 @@ public final class MegaClient: Sendable {
 
 		let res = try await apiRequest(payload: [["a": "g", "g": 1, "n": node.handle]])
 		guard let dict = res.first as? [String: Any],
-		      let downloadURLString = dict["g"] as? String,
-		      let downloadURL = URL(string: downloadURLString) else {
+		      let downloadURLString = dict["g"] as? String else {
+			throw MegaClientError.invalidResponse
+		}
+
+		var urlStr = downloadURLString
+		if urlStr.hasPrefix("http://") {
+			urlStr = "https://" + urlStr.dropFirst(7)
+		}
+		guard let downloadURL = URL(string: urlStr) else {
 			throw MegaClientError.invalidResponse
 		}
 
@@ -515,11 +563,13 @@ public final class MegaClient: Sendable {
 		defer { try? writeHandle.close() }
 
 		let fileSize = (try? FileManager.default.attributesOfItem(atPath: tempURL.path)[.size] as? Int64) ?? 0
+		progress?.totalUnitCount = fileSize
 		let chunkList = MegaCrypto.chunkSizes(fileSize: fileSize)
 		let baseIvBytes = [UInt8](iv)
 		let keyBytes = [UInt8](node.aesKey)
 
 		for chunk in chunkList {
+			try Task.checkCancellation()
 			try autoreleasepool {
 				try readHandle.seek(toOffset: UInt64(chunk.offset))
 				guard let chunkData = try readHandle.read(upToCount: chunk.length), !chunkData.isEmpty else {
@@ -545,11 +595,19 @@ public final class MegaClient: Sendable {
 		}
 
 		let fileSize = (try? FileManager.default.attributesOfItem(atPath: localURL.path)[.size] as? Int64) ?? 0
+		progress?.totalUnitCount = fileSize
 
 		let res = try await apiRequest(payload: [["a": "u", "s": fileSize]])
 		guard let dict = res.first as? [String: Any],
-		      let uploadURLString = dict["p"] as? String,
-		      let uploadURL = URL(string: uploadURLString) else {
+		      let uploadURLString = dict["p"] as? String else {
+			throw MegaClientError.invalidResponse
+		}
+
+		var urlStr = uploadURLString
+		if urlStr.hasPrefix("http://") {
+			urlStr = "https://" + urlStr.dropFirst(7)
+		}
+		guard let uploadURL = URL(string: urlStr) else {
 			throw MegaClientError.invalidResponse
 		}
 
@@ -574,6 +632,7 @@ public final class MegaClient: Sendable {
 
 		var macA32: [UInt32] = [0, 0]
 		for chunk in chunkList {
+			try Task.checkCancellation()
 			try autoreleasepool {
 				try readHandle.seek(toOffset: UInt64(chunk.offset))
 				guard let chunkData = try readHandle.read(upToCount: chunk.length) else {
@@ -607,6 +666,7 @@ public final class MegaClient: Sendable {
 		}
 
 		for chunk in chunkList {
+			try Task.checkCancellation()
 			try autoreleasepool {
 				try readHandle.seek(toOffset: UInt64(chunk.offset))
 				guard let chunkData = try readHandle.read(upToCount: chunk.length) else {
@@ -690,52 +750,74 @@ public final class MegaClient: Sendable {
 	// MARK: - Low-Level API Request
 
 	private func apiRequest(payload: [[String: Any]]) async throws -> [Any] {
-		let (seq, currentSid) = state.withLock { state -> (Int, String?) in
-			state.sequenceNumber += 1
-			return (state.sequenceNumber, state.sessionId)
-		}
-
-		var urlComponents = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
-		var queryItems: [URLQueryItem] = [URLQueryItem(name: "id", value: "\(seq)")]
-		if let sid = currentSid {
-			queryItems.append(URLQueryItem(name: "sid", value: sid))
-		}
-		urlComponents.queryItems = queryItems
-
-		guard let requestURL = urlComponents.url else {
-			throw MegaClientError.invalidResponse
-		}
-
-		var request = URLRequest(url: requestURL)
-		request.httpMethod = "POST"
-		request.setValue("application/json", forHTTPHeaderField: "Content-Type")
-		request.httpBody = try JSONSerialization.data(withJSONObject: payload)
-
-		let (data, response): (Data, URLResponse)
-		do {
-			(data, response) = try await session.data(for: request)
-		} catch {
-			throw MegaClientError.networkError(error.localizedDescription)
-		}
-
-		guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
-			throw MegaClientError.invalidResponse
-		}
-
-		if let intError = try? JSONDecoder().decode(Int.self, from: data), intError < 0 {
-			throw MegaClientError.apiError(code: intError)
-		}
-
-		let json = try JSONSerialization.jsonObject(with: data)
-		if let array = json as? [Any] {
-			if let firstInt = array.first as? Int, firstInt < 0 {
-				throw MegaClientError.apiError(code: firstInt)
+		var lastError: Error = MegaClientError.invalidResponse
+		for attempt in 0..<3 {
+			let (seq, currentSid) = state.withLock { state -> (Int, String?) in
+				state.sequenceNumber += 1
+				return (state.sequenceNumber, state.sessionId)
 			}
-			return array
-		} else if let dict = json as? [String: Any] {
-			return [dict]
-		}
 
-		throw MegaClientError.invalidResponse
+			var urlComponents = URLComponents(url: baseURL, resolvingAgainstBaseURL: false)!
+			var queryItems: [URLQueryItem] = [URLQueryItem(name: "id", value: "\(seq)")]
+			if let sid = currentSid {
+				queryItems.append(URLQueryItem(name: "sid", value: sid))
+			}
+			urlComponents.queryItems = queryItems
+
+			guard let requestURL = urlComponents.url else {
+				throw MegaClientError.invalidResponse
+			}
+
+			var request = URLRequest(url: requestURL)
+			request.httpMethod = "POST"
+			request.setValue("application/json", forHTTPHeaderField: "Content-Type")
+			request.httpBody = try JSONSerialization.data(withJSONObject: payload)
+
+			let data: Data
+			let response: URLResponse
+			do {
+				(data, response) = try await session.data(for: request)
+			} catch {
+				lastError = MegaClientError.networkError(error.localizedDescription)
+				if attempt < 2 {
+					try? await Task.sleep(nanoseconds: UInt64(500_000_000 * (attempt + 1)))
+					continue
+				}
+				throw lastError
+			}
+
+			guard let httpResponse = response as? HTTPURLResponse, (200...299).contains(httpResponse.statusCode) else {
+				lastError = MegaClientError.invalidResponse
+				if attempt < 2 {
+					try? await Task.sleep(nanoseconds: UInt64(500_000_000 * (attempt + 1)))
+					continue
+				}
+				throw lastError
+			}
+
+			if let intError = try? JSONDecoder().decode(Int.self, from: data), intError < 0 {
+				if intError == -3 && attempt < 2 { // EAGAIN - temporary congestion retry
+					try? await Task.sleep(nanoseconds: UInt64(500_000_000 * (attempt + 1)))
+					continue
+				}
+				throw MegaClientError.apiError(code: intError)
+			}
+
+			let json = try JSONSerialization.jsonObject(with: data)
+			if let array = json as? [Any] {
+				if let firstInt = array.first as? Int, firstInt < 0 {
+					if firstInt == -3 && attempt < 2 { // EAGAIN - temporary congestion retry
+						try? await Task.sleep(nanoseconds: UInt64(500_000_000 * (attempt + 1)))
+						continue
+					}
+					throw MegaClientError.apiError(code: firstInt)
+				}
+				return array
+			} else if let dict = json as? [String: Any] {
+				return [dict]
+			}
+			break
+		}
+		throw lastError
 	}
 }
