@@ -50,7 +50,10 @@ public final class MegaClient: Sendable {
 		var masterKey: [UInt8]?
 		var sequenceNumber: Int = 0
 		var nodesByHandle: [String: MegaNode] = [:]
+		var childrenByParent: [String: [String]] = [:]
+		var pathToHandleCache: [String: String] = [:]
 		var rootHandle: String?
+		var lastFetchTime: Date?
 	}
 
 	private let baseURL = URL(string: "https://g.api.mega.co.nz/cs")!
@@ -208,10 +211,21 @@ public final class MegaClient: Sendable {
 
 	// MARK: - File System Navigation & Tree
 
-	public func fetchFileSystem() async throws {
-		let mk = try state.withLock { state -> [UInt8] in
-			guard let masterKey = state.masterKey else { throw MegaClientError.sessionExpired }
-			return masterKey
+	public func fetchFileSystem(force: Bool = false) async throws {
+		let (mk, shouldFetch, existingNodes) = state.withLock { state -> ([UInt8]?, Bool, [String: MegaNode]) in
+			guard let masterKey = state.masterKey else { return (nil, false, [:]) }
+			if !force, let lastFetch = state.lastFetchTime, !state.nodesByHandle.isEmpty, Date().timeIntervalSince(lastFetch) < 15.0 {
+				return (masterKey, false, state.nodesByHandle)
+			}
+			return (masterKey, true, state.nodesByHandle)
+		}
+
+		guard let masterKey = mk else {
+			throw MegaClientError.sessionExpired
+		}
+
+		if !shouldFetch {
+			return
 		}
 
 		let res = try await apiRequest(payload: [["a": "f", "c": 1]])
@@ -221,6 +235,7 @@ public final class MegaClient: Sendable {
 		}
 
 		var newNodes: [String: MegaNode] = [:]
+		var newChildren: [String: [String]] = [:]
 		var newRoot: String?
 
 		for item in fArray {
@@ -235,13 +250,22 @@ public final class MegaClient: Sendable {
 				newRoot = handle
 			}
 
+			if let ph = parentHandle {
+				newChildren[ph, default: []].append(handle)
+			}
+
+			if let existing = existingNodes[handle], existing.timestamp == ts, existing.type == type, !existing.name.isEmpty {
+				newNodes[handle] = existing
+				continue
+			}
+
 			var name = ""
 			var nodeKeyData = Data()
 			var aesKeyData = Data()
 			var ivData: Data?
 
 			if let kStr = item["k"] as? String,
-			   let (nodeKey, aesKey, iv) = MegaCrypto.decryptNodeKey(keyString: kStr, type: type, masterKey: mk) {
+			   let (nodeKey, aesKey, iv) = MegaCrypto.decryptNodeKey(keyString: kStr, type: type, masterKey: masterKey) {
 				nodeKeyData = Data(nodeKey)
 				aesKeyData = Data(aesKey)
 				if let ivBytes = iv {
@@ -268,10 +292,23 @@ public final class MegaClient: Sendable {
 		}
 
 		let finalNodes = newNodes
+		let finalChildren = newChildren
 		let finalRoot = newRoot
+		let now = Date()
+
 		state.withLock {
 			$0.nodesByHandle = finalNodes
+			$0.childrenByParent = finalChildren
 			$0.rootHandle = finalRoot
+			$0.lastFetchTime = now
+			$0.pathToHandleCache.removeAll()
+		}
+	}
+
+	public func invalidateCache() {
+		state.withLock {
+			$0.lastFetchTime = nil
+			$0.pathToHandleCache.removeAll()
 		}
 	}
 
@@ -288,33 +325,55 @@ public final class MegaClient: Sendable {
 
 	public func getChildren(of parentHandle: String) -> [MegaNode] {
 		state.withLock { state in
-			state.nodesByHandle.values.filter { $0.parentHandle == parentHandle }
+			guard let handles = state.childrenByParent[parentHandle] else {
+				return []
+			}
+			return handles.compactMap { state.nodesByHandle[$0] }
 		}
 	}
 
 	public func resolvePath(_ path: String) -> MegaNode? {
-		let (rootNode, nodes) = state.withLock { state -> (MegaNode?, [String: MegaNode]) in
-			guard let rh = state.rootHandle, let root = state.nodesByHandle[rh] else {
-				return (nil, [:])
-			}
-			return (root, state.nodesByHandle)
-		}
-		guard let currentRoot = rootNode else { return nil }
-
 		let clean = path.trimmingCharacters(in: CharacterSet(charactersIn: "/"))
+
+		let (rootNode, cachedHandle, nodes, childrenByParent) = state.withLock { state -> (MegaNode?, String?, [String: MegaNode], [String: [String]]) in
+			guard let rh = state.rootHandle, let root = state.nodesByHandle[rh] else {
+				return (nil, nil, [:], [:])
+			}
+			return (root, state.pathToHandleCache[clean], state.nodesByHandle, state.childrenByParent)
+		}
+
+		guard let currentRoot = rootNode else { return nil }
 		if clean.isEmpty {
 			return currentRoot
 		}
 
+		if let ch = cachedHandle, let node = nodes[ch] {
+			return node
+		}
+
 		let components = clean.components(separatedBy: "/").filter { !$0.isEmpty }
 		var current = currentRoot
+		var currentPath = ""
+		var resolvedPaths: [(String, String)] = []
 
 		for comp in components {
-			let children = nodes.values.filter { $0.parentHandle == current.handle }
-			guard let match = children.first(where: { $0.name == comp }) else {
+			currentPath = currentPath.isEmpty ? comp : "\(currentPath)/\(comp)"
+			guard let childHandles = childrenByParent[current.handle] else {
 				return nil
 			}
-			current = match
+			guard let matchHandle = childHandles.first(where: { nodes[$0]?.name == comp }),
+			      let matchNode = nodes[matchHandle] else {
+				return nil
+			}
+			current = matchNode
+			resolvedPaths.append((currentPath, matchNode.handle))
+		}
+
+		let finalResolved = resolvedPaths
+		state.withLock { state in
+			for (p, h) in finalResolved {
+				state.pathToHandleCache[p] = h
+			}
 		}
 		return current
 	}
@@ -373,6 +432,8 @@ public final class MegaClient: Sendable {
 
 		state.withLock {
 			$0.nodesByHandle[handle] = createdNode
+			$0.childrenByParent[parentHandle, default: []].append(handle)
+			$0.pathToHandleCache.removeAll()
 		}
 
 		return createdNode
@@ -381,7 +442,11 @@ public final class MegaClient: Sendable {
 	public func deleteNode(handle: String) async throws {
 		_ = try await apiRequest(payload: [["a": "d", "n": handle]])
 		state.withLock {
+			if let parent = $0.nodesByHandle[handle]?.parentHandle {
+				$0.childrenByParent[parent]?.removeAll(where: { $0 == handle })
+			}
 			_ = $0.nodesByHandle.removeValue(forKey: handle)
+			$0.pathToHandleCache.removeAll()
 		}
 	}
 
@@ -389,6 +454,10 @@ public final class MegaClient: Sendable {
 		_ = try await apiRequest(payload: [["a": "m", "n": handle, "t": toParentHandle]])
 		state.withLock { state in
 			if let existing = state.nodesByHandle[handle] {
+				if let oldParent = existing.parentHandle {
+					state.childrenByParent[oldParent]?.removeAll(where: { $0 == handle })
+				}
+				state.childrenByParent[toParentHandle, default: []].append(handle)
 				let updated = MegaNode(
 					handle: existing.handle,
 					parentHandle: toParentHandle,
@@ -401,6 +470,7 @@ public final class MegaClient: Sendable {
 					iv: existing.iv
 				)
 				state.nodesByHandle[handle] = updated
+				state.pathToHandleCache.removeAll()
 			}
 		}
 	}
@@ -610,6 +680,8 @@ public final class MegaClient: Sendable {
 
 		state.withLock {
 			$0.nodesByHandle[finalHandle] = createdNode
+			$0.childrenByParent[parentHandle, default: []].append(finalHandle)
+			$0.pathToHandleCache.removeAll()
 		}
 
 		return createdNode

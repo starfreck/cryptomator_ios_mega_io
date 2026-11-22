@@ -16,9 +16,9 @@ public final class MegaCloudProvider: CloudProvider, @unchecked Sendable {
 		try client.fastLogin(sessionToken: credential.sessionToken)
 	}
 
-	private func ensureFileSystemFresh() async throws {
+	private func ensureFileSystemFresh(force: Bool = false) async throws {
 		do {
-			try await client.fetchFileSystem()
+			try await client.fetchFileSystem(force: force)
 		} catch let error as MegaClientError {
 			throw mapError(error, cloudPath: CloudPath("/"))
 		}
