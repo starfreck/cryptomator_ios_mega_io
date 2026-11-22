@@ -79,6 +79,14 @@ class VaultDetailInfoFooterViewModel: BindableAttributedTextHeaderFooterViewMode
 		case .webDAV:
 			let credential = WebDAVCredentialManager.shared.getCredentialFromKeychain(with: vault.delegateAccountUID)
 			return credential?.username
+		case .mega:
+			if let credential = MegaCredentialManager.shared.getCredential(with: vault.delegateAccountUID) {
+				if let displayName = try? MegaCredentialManager.shared.getDisplayName(for: credential), !displayName.isEmpty {
+					return displayName
+				}
+				return credential.email
+			}
+			return nil
 		}
 	}
 

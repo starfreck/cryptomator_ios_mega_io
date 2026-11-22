@@ -56,7 +56,7 @@ class SettingsCoordinator: Coordinator {
 	}
 
 	func showCloudServices() {
-		let viewModel = ChooseCloudViewModel(clouds: [.dropbox, .googleDrive, .microsoftGraph(type: .oneDrive), .microsoftGraph(type: .sharePoint), .pCloud, .box, .webDAV(type: .custom), .s3(type: .custom)], headerTitle: "")
+		let viewModel = ChooseCloudViewModel(clouds: [.dropbox, .googleDrive, .microsoftGraph(type: .oneDrive), .microsoftGraph(type: .sharePoint), .pCloud, .box, .webDAV(type: .custom), .s3(type: .custom), .mega], headerTitle: "")
 		let chooseCloudVC = ChooseCloudViewController(viewModel: viewModel)
 		chooseCloudVC.title = LocalizedString.getValue("settings.cloudServices")
 		chooseCloudVC.coordinator = self

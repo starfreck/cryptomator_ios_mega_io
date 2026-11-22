@@ -33,7 +33,8 @@ let package = Package(
 		.package(url: "https://github.com/cryptomator/cloud-access-swift.git", .upToNextMinor(from: "4.0.0")),
 		.package(url: "https://github.com/CocoaLumberjack/CocoaLumberjack.git", .upToNextMinor(from: "3.10.0")),
 		.package(url: "https://github.com/pointfreeco/swift-dependencies.git", .upToNextMajor(from: "1.12.0")),
-		.package(url: "https://github.com/leif-ibsen/SwiftECC", .upToNextMinor(from: "5.5.0"))
+		.package(url: "https://github.com/leif-ibsen/SwiftECC", .upToNextMinor(from: "5.5.0")),
+		.package(url: "https://github.com/leif-ibsen/BigInt", .upToNextMinor(from: "1.22.0"))
 	],
 	targets: [
 		.target(
@@ -50,7 +51,8 @@ let package = Package(
 				.product(name: "CocoaLumberjackSwift", package: "CocoaLumberjack"),
 				.product(name: "CryptomatorCloudAccessCore", package: "cloud-access-swift"),
 				.product(name: "Dependencies", package: "swift-dependencies"),
-				.product(name: "SwiftECC", package: "SwiftECC")
+				.product(name: "SwiftECC", package: "SwiftECC"),
+				.product(name: "BigInt", package: "BigInt")
 			],
 			swiftSettings: swiftSettings
 		),

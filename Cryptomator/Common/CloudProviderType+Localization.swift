@@ -29,6 +29,8 @@ extension CloudProviderType {
 			return "S3"
 		case .webDAV:
 			return "WebDAV"
+		case .mega:
+			return "MEGA"
 		}
 	}
 
@@ -49,6 +51,8 @@ extension CloudProviderType {
 		case .s3:
 			return nil
 		case .webDAV:
+			return nil
+		case .mega:
 			return nil
 		}
 	}

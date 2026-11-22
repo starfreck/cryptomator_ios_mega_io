@@ -133,6 +133,8 @@ extension CloudProviderType {
 			return "s3-vault"
 		case .webDAV:
 			return "webdav-vault"
+		case .mega:
+			return "mega-vault"
 		}
 	}
 }

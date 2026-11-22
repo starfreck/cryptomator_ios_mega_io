@@ -217,7 +217,11 @@ public final class FileProviderAdapterManager: FileProviderAdapterProviding, @un
 	private func lockVault(with domainIdentifier: NSFileProviderDomainIdentifier) throws {
 		adapterCache.removeItem(identifier: domainIdentifier)
 		try masterkeyCacheManager.removeCachedMasterkey(forVaultUID: domainIdentifier.rawValue)
-		let notificator = try notificatorManager.getFileProviderNotificator(for: NSFileProviderDomain(identifier: domainIdentifier, displayName: "", pathRelativeToDocumentStorage: ""))
+		let domain = NSFileProviderDomain(identifier: domainIdentifier, displayName: "", pathRelativeToDocumentStorage: "")
+		if let cacheManager = try? CachedFileDBManagerFactory.shared.createCachedFileManager(for: domain) {
+			try? cacheManager.clearCache()
+		}
+		let notificator = try notificatorManager.getFileProviderNotificator(for: domain)
 		notificator.refreshWorkingSet()
 	}
 

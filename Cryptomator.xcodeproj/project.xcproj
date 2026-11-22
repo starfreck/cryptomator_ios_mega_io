@@ -351,6 +351,15 @@
           ],
         }, {
           "kind": "group",
+          "path": "Mega",
+          "children": [
+            { "path": "MegaAuthenticator+VC.swift", "target-membership": [ "Cryptomator/compile-sources" ] },
+            { "path": "MegaAuthenticationView.swift", "target-membership": [ "Cryptomator/compile-sources" ] },
+            { "path": "MegaAuthenticationViewModel.swift", "target-membership": [ "Cryptomator/compile-sources" ] },
+            { "path": "MegaAuthenticationViewController.swift", "target-membership": [ "Cryptomator/compile-sources" ] },
+          ],
+        }, {
+          "kind": "group",
           "path": "Settings",
           "children": [
             { "path": "SettingsCoordinator.swift", "target-membership": [ "Cryptomator/compile-sources" ] },

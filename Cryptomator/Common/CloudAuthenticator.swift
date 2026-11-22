@@ -46,6 +46,8 @@ class CloudAuthenticator {
 			return try await authenticateS3(from: viewController)
 		case .webDAV:
 			return try await authenticateWebDAV(from: viewController)
+		case .mega:
+			return try await authenticateMega(from: viewController)
 		}
 	}
 
@@ -106,6 +108,13 @@ class CloudAuthenticator {
 		return account
 	}
 
+	func authenticateMega(from viewController: UIViewController) async throws -> CloudProviderAccount {
+		let credential = try await MegaAuthenticator.authenticate(from: viewController)
+		let account = CloudProviderAccount(accountUID: credential.identifier, cloudProviderType: .mega)
+		try accountManager.saveNewAccount(account)
+		return account
+	}
+
 	func deauthenticate(account: CloudProviderAccount) throws {
 		switch account.cloudProviderType {
 		case .box:
@@ -127,6 +136,15 @@ class CloudAuthenticator {
 			try S3CredentialManager.shared.removeCredential(with: account.accountUID)
 		case .webDAV:
 			try WebDAVCredentialManager.shared.removeCredentialFromKeychain(with: account.accountUID)
+		case .mega:
+			if let credential = MegaCredentialManager.shared.getCredential(with: account.accountUID) {
+				Task {
+					let client = MegaClient()
+					try? client.fastLogin(sessionToken: credential.sessionToken)
+					try? await client.logout()
+				}
+			}
+			try MegaCredentialManager.shared.removeCredential(with: account.accountUID)
 		}
 		let correspondingVaults = try vaultAccountManager.getAllAccounts().filter { $0.delegateAccountUID == account.accountUID }
 		let vaultUIDs = correspondingVaults.map { $0.vaultUID }

@@ -121,6 +121,14 @@ class AccountListViewModel: AccountListViewModelProtocol {
 				throw CloudProviderAccountError.accountNotFoundError
 			}
 			return createAccountCellContent(for: credential)
+		case .mega:
+			guard let credential = MegaCredentialManager.shared.getCredential(with: accountInfo.accountUID) else {
+				throw CloudProviderAccountError.accountNotFoundError
+			}
+			let displayName = try? MegaCredentialManager.shared.getDisplayName(for: credential)
+			let mainText = displayName?.isEmpty == false ? displayName! : credential.email
+			let detailText = displayName?.isEmpty == false ? credential.email : nil
+			return AccountCellContent(mainLabelText: mainText, detailLabelText: detailText)
 		}
 	}
 

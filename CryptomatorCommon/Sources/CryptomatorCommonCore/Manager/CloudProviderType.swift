@@ -19,6 +19,7 @@ public enum CloudProviderType: Codable, Equatable, Hashable, DatabaseValueConver
 	case pCloud
 	case s3(type: S3Type)
 	case webDAV(type: WebDAVType)
+	case mega
 }
 
 public enum LocalFileSystemType: Codable, Sendable {

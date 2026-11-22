@@ -26,7 +26,7 @@ extension CloudProviderType {
 		switch self {
 		case .box, .dropbox, .googleDrive, .microsoftGraph, .pCloud:
 			return .reauthenticate
-		case .s3, .webDAV:
+		case .s3, .webDAV, .mega:
 			return .editExisting
 		case .localFileSystem:
 			return .unsupported

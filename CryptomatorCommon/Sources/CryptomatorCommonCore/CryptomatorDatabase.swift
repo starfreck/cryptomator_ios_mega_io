@@ -103,6 +103,9 @@ public class CryptomatorDatabase {
 		migrator.registerMigration("removePositionRenumberingOnDelete") { db in
 			try removePositionRenumberingOnDelete(db)
 		}
+		migrator.registerMigration("megaDisplayNameMigration") { db in
+			try megaDisplayNameMigration(db)
+		}
 		return migrator
 	}
 
@@ -206,6 +209,22 @@ public class CryptomatorDatabase {
 		ON cloudProviderAccounts
 		BEGIN
 		    DELETE FROM s3DisplayNames
+		    WHERE id = OLD.accountUID;
+		END;
+		""")
+	}
+
+	class func megaDisplayNameMigration(_ db: Database) throws {
+		try db.create(table: "megaDisplayNames", body: { table in
+			table.column("id", .text).primaryKey()
+			table.column("displayName", .text).notNull()
+		})
+		try db.execute(sql: """
+		CREATE TRIGGER mega_display_name_deletion
+		AFTER DELETE
+		ON cloudProviderAccounts
+		BEGIN
+		    DELETE FROM megaDisplayNames
 		    WHERE id = OLD.accountUID;
 		END;
 		""")

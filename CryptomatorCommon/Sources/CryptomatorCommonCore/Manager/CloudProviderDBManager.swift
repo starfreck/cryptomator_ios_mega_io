@@ -96,6 +96,9 @@ public class CloudProviderDBManager: CloudProviderManager, CloudProviderUpdating
 			let credential = try getWebDAVCredential(for: accountUID)
 			let client = WebDAVClient(credential: credential)
 			provider = try WebDAVProvider(with: client, maxPageSize: .max)
+		case .mega:
+			let credential = try getMegaCredential(for: accountUID)
+			provider = try MegaCloudProvider(credential: credential)
 		}
 		CloudProviderDBManager.cachedProvider.withLock { $0.append(
 			.init(
@@ -147,6 +150,9 @@ public class CloudProviderDBManager: CloudProviderManager, CloudProviderUpdating
 			let credential = try getWebDAVCredential(for: accountUID)
 			let client = WebDAVClient.withBackgroundSession(credential: credential, sessionIdentifier: sessionIdentifier, sharedContainerIdentifier: CryptomatorConstants.appGroupName)
 			provider = try WebDAVProvider(with: client, maxPageSize: maxPageSizeForFileProvider)
+		case .mega:
+			let credential = try getMegaCredential(for: accountUID)
+			provider = try MegaCloudProvider(credential: credential)
 		}
 		CloudProviderDBManager.cachedProvider.withLock { $0.append(
 			.init(
@@ -156,6 +162,13 @@ public class CloudProviderDBManager: CloudProviderManager, CloudProviderUpdating
 			)
 		) }
 		return provider
+	}
+
+	private func getMegaCredential(for accountUID: String) throws -> MegaCredential {
+		guard let credential = MegaCredentialManager.shared.getCredential(with: accountUID) else {
+			throw CloudProviderAccountError.accountNotFoundError
+		}
+		return credential
 	}
 
 	private func getS3Credential(for accountUID: String) throws -> S3Credential {
